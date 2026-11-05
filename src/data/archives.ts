@@ -5,9 +5,10 @@ export interface ArchiveService {
   country: string;
   flag: string;
   category: string;
-  searchUrl: (url: string) => string;
+  searchUrl: (url: string, date?: string) => string;
   homepage: string;
   notes?: string;
+  supportsDate?: boolean;
 }
 
 export const categories = [
@@ -27,9 +28,16 @@ export const archives: ArchiveService[] = [
     country: 'USA',
     flag: '🇺🇸',
     category: 'major',
-    searchUrl: (url) => `https://web.archive.org/web/*/${url}`,
+    supportsDate: true,
+    searchUrl: (url, date) => {
+      if (date) {
+        const dateStr = date.replace(/-/g, '') + '000000';
+        return `https://web.archive.org/web/${dateStr}/${url}`;
+      }
+      return `https://web.archive.org/web/*/${url}`;
+    },
     homepage: 'https://web.archive.org',
-    notes: 'Supports URL lookup and calendar view of all captures',
+    notes: 'Supports exact date lookup — see the page as it was on a specific day',
   },
   {
     id: 'archive-it',
@@ -49,7 +57,13 @@ export const archives: ArchiveService[] = [
     country: 'International',
     flag: '🌍',
     category: 'major',
-    searchUrl: (url) => `https://archive.ph/newest/${url}`,
+    supportsDate: true,
+    searchUrl: (url, date) => {
+      if (date) {
+        return `https://archive.ph/${date.replace(/-/g, '')}/${url}`;
+      }
+      return `https://archive.ph/newest/${url}`;
+    },
     homepage: 'https://archive.ph',
     notes: 'Also available at archive.today, archive.li, archive.md',
   },
@@ -60,7 +74,13 @@ export const archives: ArchiveService[] = [
     country: 'Portugal',
     flag: '🇵🇹',
     category: 'major',
-    searchUrl: (url) => `https://arquivo.pt/search?q=${encodeURIComponent(url)}`,
+    supportsDate: true,
+    searchUrl: (url, date) => {
+      if (date) {
+        return `https://arquivo.pt/search?q=${encodeURIComponent(url)}&date=${date.replace(/-/g, '')}`;
+      }
+      return `https://arquivo.pt/search?q=${encodeURIComponent(url)}`;
+    },
     homepage: 'https://arquivo.pt',
     notes: 'One of the few archives with a full CDX API compatible with Wayback',
   },
@@ -270,9 +290,15 @@ export const archives: ArchiveService[] = [
     country: 'International',
     flag: '🌍',
     category: 'aggregators',
-    searchUrl: (url) => `https://timetravel.mementoweb.org/`,
+    supportsDate: true,
+    searchUrl: (url, date) => {
+      if (date) {
+        return `https://timetravel.mementoweb.org/memento/${date.replace(/-/g, '')}/${url}`;
+      }
+      return `https://timetravel.mementoweb.org/`;
+    },
     homepage: 'https://mementoweb.org',
-    notes: 'Enter URL manually - aggregator across many archives (may be temporarily unavailable)',
+    notes: 'Aggregator across many archives (may be temporarily unavailable)',
   },
   {
     id: 'common-crawl',
