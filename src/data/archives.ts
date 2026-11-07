@@ -1,3 +1,6 @@
+import { youtubeVideoId } from '../services/targets';
+export { youtubeVideoId } from '../services/targets';
+
 export interface ArchiveService {
   id: string;
   name: string;
@@ -9,6 +12,8 @@ export interface ArchiveService {
   homepage: string;
   notes?: string;
   supportsDate?: boolean;
+  instructions?: string;
+  linkLabel?: string;
   tlds?: string[]; // Country TLDs this archive is relevant for
 }
 
@@ -16,11 +21,64 @@ export const categories = [
   { id: 'major', name: 'Major Web Archives', icon: '🌐' },
   { id: 'national', name: 'National Web Archives', icon: '🏛️' },
   { id: 'aggregators', name: 'Aggregators & Tools', icon: '🔍' },
-  { id: 'cache', name: 'Search Engine Caches', icon: '💾' },
+  { id: 'cache', name: 'Search Engines', icon: '💾' },
   { id: 'specialized', name: 'Specialized Archives', icon: '📚' },
+  { id: 'video', name: 'YouTube & Video Recovery', icon: '🎬' },
 ];
 
+function youtubeUrl(input: string): boolean {
+  try {
+    return ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be', 'youtube-nocookie.com', 'www.youtube-nocookie.com'].includes(new URL(input).hostname.toLowerCase());
+  } catch { return false; }
+}
+
 export const archives: ArchiveService[] = [
+  {
+    id: 'archivarix-echo',
+    name: 'Archivarix Echo',
+    description: 'Routes URLs and other identifiers to relevant archives across many collections',
+    country: 'International', flag: '🌍', category: 'aggregators',
+    homepage: 'https://echo.archivarix.net/',
+    searchUrl: (url) => `https://echo.archivarix.net/search?q=${encodeURIComponent(url)}`,
+    instructions: 'Searches open in Echo. Some sources provide only links; a listed archive is not proof that it holds your URL.',
+  },
+  {
+    id: 'archivarix',
+    name: 'Archivarix Tools',
+    description: 'Directory of Archivarix tools for web archives, deleted videos, and image research',
+    country: 'International', flag: '🌍', category: 'aggregators',
+    homepage: 'https://archivarix.net/',
+    searchUrl: () => 'https://archivarix.net/',
+    linkLabel: 'Browse tools',
+    instructions: 'This is a tools directory. Use Echo for web URLs or Tube for YouTube videos.',
+  },
+  {
+    id: 'archivarix-tube',
+    name: 'Archivarix Tube',
+    description: 'Find archived YouTube video metadata, subtitles, thumbnails, and possible video copies',
+    country: 'International', flag: '🎬', category: 'video',
+    homepage: 'https://tube.archivarix.net/',
+    searchUrl: (url) => youtubeUrl(url) ? `https://tube.archivarix.net/search?q=${encodeURIComponent(youtubeVideoId(url) || url)}` : 'https://tube.archivarix.net/',
+    instructions: 'For YouTube video or channel URLs. Other URLs open the tool home page. Metadata may exist even when the video file is unavailable.',
+  },
+  {
+    id: 'filmot',
+    name: 'Filmot',
+    description: 'Search YouTube subtitles and metadata, including records of unavailable videos',
+    country: 'International', flag: '🎬', category: 'video',
+    homepage: 'https://filmot.com/',
+    searchUrl: (url) => { const id = youtubeVideoId(url); return id ? `https://filmot.com/video/${id}` : 'https://filmot.com/'; },
+    instructions: 'A YouTube video URL opens its metadata page; other URLs open the home page for keyword search. May require a CAPTCHA. A record does not confirm a playable copy.',
+  },
+  {
+    id: 'quite-a-playlist',
+    name: 'Quite a Playlist',
+    description: 'Identify deleted or private YouTube videos from video and playlist links',
+    country: 'International', flag: '🎬', category: 'video',
+    homepage: 'https://quiteaplaylist.com/',
+    searchUrl: (url) => youtubeUrl(url) ? `https://quiteaplaylist.com/search?url=${encodeURIComponent(url)}` : 'https://quiteaplaylist.com/',
+    instructions: 'For YouTube videos and playlists. Other URLs open the home page. Restored titles or metadata do not guarantee the video can be watched.',
+  },
   // Major Web Archives
   {
     id: 'wayback',
@@ -88,13 +146,13 @@ export const archives: ArchiveService[] = [
   },
   {
     id: 'ghost-archive',
-    name: 'Ghost Archive',
-    description: 'Web archiving service for capturing and preserving pages',
+    name: 'Ghostarchive',
+    description: 'Archived web pages and YouTube captures; search for a page or video URL',
     country: 'International',
     flag: '🌍',
     category: 'major',
-    searchUrl: (url) => `https://ghostarchive.com/search?term=${encodeURIComponent(url)}`,
-    homepage: 'https://ghostarchive.com',
+    searchUrl: (url) => `https://ghostarchive.org/search?term=${encodeURIComponent(url)}`,
+    homepage: 'https://ghostarchive.org',
   },
 
   // National Web Archives
@@ -370,36 +428,36 @@ export const archives: ArchiveService[] = [
   // Search Engine Caches
   {
     id: 'google-cache',
-    name: 'Google Cache',
-    description: 'Google\'s cached version of web pages',
+    name: 'Google URL Search',
+    description: 'Search for references to this URL on the live web; not an archive lookup',
     country: 'International',
     flag: '🌍',
     category: 'cache',
-    searchUrl: (url) => `https://webcache.googleusercontent.com/search?q=cache:${encodeURIComponent(url)}`,
+    searchUrl: (url) => `https://www.google.com/search?q=${encodeURIComponent(`"${url}"`)}`,
     homepage: 'https://www.google.com',
     notes: 'Google is phasing out direct cache access; use Google search instead',
   },
   {
     id: 'bing-cache',
-    name: 'Bing Cache',
-    description: 'Bing\'s cached version of web pages',
+    name: 'Bing URL Search',
+    description: 'Find live-web references to a URL; does not verify archived copies',
     country: 'International',
     flag: '🌍',
     category: 'cache',
-    searchUrl: (url) => `https://cc.bingj.com/cache.aspx?q=${encodeURIComponent(url)}`,
+    searchUrl: (url) => `https://www.bing.com/search?q=${encodeURIComponent(`"${url}"`)}`,
     homepage: 'https://www.bing.com',
   },
   {
     id: 'yandex-cache',
-    name: 'Yandex Cache',
-    description: 'Yandex search engine cached pages',
+    name: 'Yandex URL Search',
+    description: 'Search the live web for references to a URL; availability of cached content varies',
     country: 'Russia',
     flag: '🇷🇺',
     category: 'cache',
     tlds: ['.ru', '.su'],
     searchUrl: (url) => `https://yandex.com/search/?text=${encodeURIComponent(url)}`,
     homepage: 'https://yandex.com',
-    notes: 'Search for the URL and click "Cached" link in results',
+    notes: 'Live search results are discovery leads, not confirmed archive records',
   },
 
   // Specialized Archives

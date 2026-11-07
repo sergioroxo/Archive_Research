@@ -1,823 +1,1065 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
-import { archives, categories, ArchiveService } from './data/archives';
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Layers,
+  Search,
+  History,
+  Link as LinkIcon,
+  Video,
+  Youtube,
+  X,
+  ExternalLink,
+  Landmark,
+  CheckCircle2,
+  Database,
+  Loader2,
+  AlertCircle,
+  ArrowRight,
+  Download,
+  Upload,
+  Check,
+  Copy,
+  ChevronDown,
+  Globe,
+  FileText,
+} from "lucide-react";
+import { archives, categories, ArchiveService } from "./data/archives";
+import {
+  automaticArchiveIds,
+  checkTargetAvailability,
+  Availability,
+} from "./services/availability";
+import {
+  parseTarget,
+  reviewedForTarget,
+  toggleReviewed,
+} from "./services/targets";
+import { readHistoryBackup, mergeReviewed } from "./services/history";
 
-// localStorage helpers
-const STORAGE_KEYS = {
-  checked: 'webarchive_checked',
-  recentUrls: 'webarchive_recent_urls',
-  viewMode: 'webarchive_view_mode',
+type Page = "search" | "history" | "sources";
+type Results = Record<string, Availability>;
+type ReportFormat = "markdown" | "text" | "json";
+const keys = {
+  checked: "webarchive_checked_by_target_v2",
+  recent: "webarchive_recent_urls",
+  legacy: "webarchive_checked",
+  view: "webarchive_view_mode",
 };
-
-function loadFromStorage<T>(key: string, fallback: T): T {
+function load<T>(key: string, fallback: T): T {
   try {
-    const item = localStorage.getItem(key);
-    return item ? JSON.parse(item) : fallback;
+    const value = localStorage.getItem(key);
+    return value ? JSON.parse(value) : fallback;
   } catch {
     return fallback;
   }
 }
-
-function saveToStorage(key: string, value: unknown) {
+function save(key: string, value: unknown) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    return true;
   } catch {
-    // silently fail
+    return false;
   }
 }
-
-type ViewMode = 'compact' | 'detailed';
-
-function App() {
-  // State with localStorage persistence
-  const [url, setUrl] = useState('');
-  const [date, setDate] = useState('');
-  const [searchFilter, setSearchFilter] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<string>('all');
-  const [checkedArchives, setCheckedArchives] = useState<Set<string>>(
-    () => new Set(loadFromStorage<string[]>(STORAGE_KEYS.checked, []))
+function download(
+  content: string,
+  filename: string,
+  type = "application/json",
+) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function captureDate(timestamp?: string) {
+  if (!timestamp || !/^\d{14}$/.test(timestamp)) return "Date unavailable";
+  const d = new Date(
+    `${timestamp.slice(0, 4)}-${timestamp.slice(4, 6)}-${timestamp.slice(6, 8)}T${timestamp.slice(8, 10)}:${timestamp.slice(10, 12)}:${timestamp.slice(12, 14)}Z`,
   );
-  const [recentUrls, setRecentUrls] = useState<string[]>(
-    () => loadFromStorage<string[]>(STORAGE_KEYS.recentUrls, [])
+  return Number.isNaN(d.getTime())
+    ? "Date unavailable"
+    : d.toLocaleDateString("en-GB", {
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+        timeZone: "UTC",
+      });
+}
+function SourceIcon({ id, size = 34 }: { id: string; size?: number }) {
+  return id === "wayback" ? (
+    <Landmark size={size} strokeWidth={1.6} />
+  ) : (
+    <Layers size={size} strokeWidth={1.6} />
   );
-  const [viewMode, setViewMode] = useState<ViewMode>(
-    () => loadFromStorage<ViewMode>(STORAGE_KEYS.viewMode, 'detailed')
-  );
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [showExport, setShowExport] = useState(false);
-  const [exportFormat, setExportFormat] = useState<'markdown' | 'text' | 'json'>('markdown');
+}
+function resultLabel(result?: Availability) {
+  if (!result) return "Not checked";
+  if (result.status === "found")
+    return result.evidenceType === "watch-page"
+      ? "Watch page found"
+      : "Archive record found";
+  return result.status === "checking"
+    ? "Checking archive…"
+    : result.status === "not-found"
+      ? "No snapshot found"
+      : "Could not check";
+}
 
-  // Persist checked state
+export default function App() {
+  const [page, setPage] = useState<Page>("search");
+  const [input, setInput] = useState("");
+  const target = useMemo(() => parseTarget(input), [input]);
+  const valid = Boolean(target.canonicalUrl);
+  const [recent, setRecent] = useState<string[]>(() => {
+    const value = load<unknown>(keys.recent, []);
+    return Array.isArray(value)
+      ? value.filter((v): v is string => typeof v === "string")
+      : [];
+  });
+  const [reviewed, setReviewed] = useState<Record<string, string[]>>(() => {
+    const value = load<unknown>(keys.checked, {});
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, string[]>)
+      : {};
+  });
+  const [legacy, setLegacy] = useState<string[]>(() => {
+    const value = load<unknown>(keys.legacy, []);
+    return Array.isArray(value)
+      ? value.filter((v): v is string => typeof v === "string")
+      : [];
+  });
+  const [lookups, setLookups] = useState<Record<string, Results>>({});
+  const results = lookups[target.key] || {};
+  const checked = useMemo(
+    () => reviewedForTarget(reviewed, target.key),
+    [reviewed, target.key],
+  );
+  const checking = Object.values(results).some((r) => r.status === "checking");
+  const controller = useRef<AbortController | null>(null);
+  const [notice, setNotice] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [manualDate, setManualDate] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [category, setCategory] = useState("all");
+  const [historyFilter, setHistoryFilter] = useState("");
+  const [compact, setCompact] = useState(
+    () => load<string>(keys.view, "detailed") === "compact",
+  );
+  const [showReport, setShowReport] = useState(false);
+  const [reportFormat, setReportFormat] = useState<ReportFormat>("markdown");
+  const fileRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
-    saveToStorage(STORAGE_KEYS.checked, Array.from(checkedArchives));
-  }, [checkedArchives]);
-
-  // Persist view mode
+    if (!save(keys.checked, reviewed))
+      setNotice(
+        "Browser storage is full or unavailable. Export a backup to keep your progress.",
+      );
+  }, [reviewed]);
   useEffect(() => {
-    saveToStorage(STORAGE_KEYS.viewMode, viewMode);
-  }, [viewMode]);
+    if (!save(keys.recent, recent))
+      setNotice("History could not be saved in this browser. Export a backup.");
+  }, [recent]);
+  useEffect(() => {
+    save(keys.legacy, legacy);
+  }, [legacy]);
+  useEffect(() => {
+    save(keys.view, compact ? "compact" : "detailed");
+  }, [compact]);
+  useEffect(() => {
+    setExpanded(null);
+    return () => {
+      controller.current?.abort();
+    };
+  }, [target.key]);
+  // Cancelled requests must not leave a permanently disabled Check button on revisiting a target.
+  useEffect(() => {
+    setLookups((prev) =>
+      Object.fromEntries(
+        Object.entries(prev).map(([key, rows]) => [
+          key,
+          Object.fromEntries(
+            Object.entries(rows).map(([id, row]) => [
+              id,
+              row.status === "checking"
+                ? {
+                    ...row,
+                    status: "error" as const,
+                    message: "Check cancelled. Run the lookup again.",
+                  }
+                : row,
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }, [target.key]);
 
-  const normalizeUrl = (input: string): string => {
-    let normalized = input.trim();
-    if (!normalized) return '';
-    if (!normalized.startsWith('http://') && !normalized.startsWith('https://')) {
-      normalized = 'https://' + normalized;
-    }
-    return normalized;
+  const remember = (url: string) =>
+    setRecent((prev) =>
+      [
+        url,
+        ...prev.filter((u) => parseTarget(u).key !== parseTarget(url).key),
+      ].slice(0, 1000),
+    );
+  const runCheck = async () => {
+    if (!valid || checking) return;
+    controller.current?.abort();
+    const request = new AbortController();
+    controller.current = request;
+    const key = target.key;
+    const variants = target.variants;
+    remember(target.canonicalUrl);
+    setNotice("");
+    setLookups((prev) => ({
+      ...prev,
+      [key]: Object.fromEntries(
+        automaticArchiveIds.map((id) => [
+          id,
+          { status: "checking", message: "Checking archive…" },
+        ]),
+      ),
+    }));
+    await Promise.all(
+      automaticArchiveIds.map(async (id) => {
+        const result = await checkTargetAvailability(
+          id,
+          variants,
+          request.signal,
+        );
+        if (!request.signal.aborted)
+          setLookups((prev) => ({
+            ...prev,
+            [key]: { ...prev[key], [id]: result },
+          }));
+      }),
+    );
   };
-
-  const normalizedUrl = normalizeUrl(url);
-  const isValidUrl = useMemo(() => {
-    if (!url.trim()) return false;
+  const toggle = (id: string) => {
+    if (valid) {
+      setReviewed((prev) => toggleReviewed(prev, target.key, id));
+      remember(target.canonicalUrl);
+    }
+  };
+  const exportBackup = () => {
+    download(
+      JSON.stringify(
+        {
+          format: "archive-research-history",
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          recentUrls: recent,
+          checkedByTarget: reviewed,
+          legacyChecked: legacy,
+        },
+        null,
+        2,
+      ),
+      `archive-research-history-${new Date().toISOString().slice(0, 10)}.json`,
+    );
+    setNotice(
+      "History backup downloaded. Import it on another browser or device.",
+    );
+  };
+  const importBackup = async (file?: File) => {
+    if (!file) return;
     try {
-      new URL(normalizedUrl);
-      return true;
+      if (file.size > 5000000)
+        throw new Error("History backup must be smaller than 5 MB.");
+      const backup = readHistoryBackup(JSON.parse(await file.text()));
+      setReviewed((prev) => mergeReviewed(prev, backup.checkedByTarget));
+      setRecent((prev) =>
+        [...new Set([...prev, ...backup.recentUrls])].slice(0, 1000),
+      );
+      setLegacy((prev) => [...new Set([...prev, ...backup.legacyChecked])]);
+      setNotice(
+        `Imported ${backup.recentUrls.length} history entries. Existing review marks were preserved.`,
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "Could not import the history backup.",
+      );
+    }
+  };
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setNotice("Copied to clipboard.");
     } catch {
-      return false;
+      setNotice(
+        "Clipboard access is unavailable. You can download a report instead.",
+      );
     }
-  }, [url, normalizedUrl]);
-
-  // Add to recent URLs when a valid URL is entered
-  const addToRecent = useCallback((newUrl: string) => {
-    if (!newUrl.trim()) return;
-    setRecentUrls((prev) => {
-      const filtered = prev.filter((u) => u !== newUrl);
-      const updated = [newUrl, ...filtered].slice(0, 10);
-      saveToStorage(STORAGE_KEYS.recentUrls, updated);
-      return updated;
-    });
-  }, []);
-
-  // Trigger adding to recent when URL becomes valid
-  useEffect(() => {
-    if (isValidUrl) {
-      addToRecent(normalizedUrl);
-    }
-  }, [isValidUrl, normalizedUrl, addToRecent]);
-
-  const filteredArchives = useMemo(() => {
-    return archives.filter((archive) => {
-      const matchesCategory = selectedCategory === 'all' || archive.category === selectedCategory;
-      const matchesSearch =
-        !searchFilter ||
-        archive.name.toLowerCase().includes(searchFilter.toLowerCase()) ||
-        archive.country.toLowerCase().includes(searchFilter.toLowerCase()) ||
-        archive.description.toLowerCase().includes(searchFilter.toLowerCase());
-      return matchesCategory && matchesSearch;
-    });
-  }, [selectedCategory, searchFilter]);
-
-  const groupedArchives = useMemo(() => {
-    const groups: Record<string, ArchiveService[]> = {};
-    filteredArchives.forEach((archive) => {
-      if (!groups[archive.category]) {
-        groups[archive.category] = [];
-      }
-      groups[archive.category].push(archive);
-    });
-    return groups;
-  }, [filteredArchives]);
-
-  const handleToggleCheck = (id: string) => {
-    setCheckedArchives((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
   };
-
-  const handleCopyLink = (archive: ArchiveService) => {
-    if (!isValidUrl) return;
-    const searchUrl = archive.searchUrl(normalizedUrl, date || undefined);
-    navigator.clipboard.writeText(searchUrl);
-    setCopiedId(archive.id);
-    setTimeout(() => setCopiedId(null), 2000);
+  const filteredSources = archives.filter(
+    (a) =>
+      (category === "all" || a.category === category) &&
+      `${a.name} ${a.country} ${a.description}`
+        .toLowerCase()
+        .includes(sourceFilter.toLowerCase()),
+  );
+  const reportRows = filteredSources.map((a) => ({
+    source: a.name,
+    originalUrl: input,
+    canonicalUrl: target.canonicalUrl,
+    searchUrl: valid
+      ? a.searchUrl(target.canonicalUrl, manualDate || undefined)
+      : a.homepage,
+    reviewed: checked.has(a.id),
+    availability: results[a.id] || {
+      status: automaticArchiveIds.some((id) => id === a.id)
+        ? "not-checked"
+        : "manual",
+    },
+  }));
+  const report =
+    reportFormat === "json"
+      ? JSON.stringify(
+          {
+            generatedAt: new Date().toISOString(),
+            target: target.canonicalUrl,
+            manualSearchDate: manualDate || null,
+            results: reportRows,
+          },
+          null,
+          2,
+        )
+      : [
+          reportFormat === "markdown"
+            ? "# Archive Research Report"
+            : "ARCHIVE RESEARCH REPORT",
+          `URL: ${target.canonicalUrl}`,
+          "Automatic checks cover all dates. A watch-page record does not verify video playback.",
+          "",
+          ...reportRows.map(
+            (row) =>
+              `${row.reviewed ? "[x]" : "[ ]"} ${row.source}\nStatus: ${row.availability.status}\n${row.searchUrl}${"snapshotUrl" in row.availability && row.availability.snapshotUrl ? `\nSnapshot: ${row.availability.snapshotUrl}` : ""}`,
+          ),
+        ].join("\n\n");
+  const foundCount = Object.values(results).filter(
+    (r) => r.status === "found",
+  ).length;
+  const hasResults = Object.keys(results).length > 0;
+  const videoTarget = target.kind.startsWith("youtube");
+  const manualIds = videoTarget
+    ? ["ghost-archive", "filmot", "archivarix-tube"]
+    : ["ghost-archive", "archive-it", "archivarix-echo"];
+  const manualSources = manualIds.map((id) =>
+    archives.find((a) => a.id === id)!,
+  );
+  const label =
+    target.kind === "youtube-video"
+      ? "YouTube video"
+      : target.kind === "youtube-playlist"
+        ? "YouTube playlist"
+        : target.kind === "youtube-channel"
+          ? "YouTube channel"
+          : "Web URL";
+  const navigate = (next: Page) => {
+    setPage(next);
+    setNotice("");
+    window.scrollTo({ top: 0 });
   };
-
-  const handleCopyAllLinks = () => {
-    if (!isValidUrl) return;
-    const links = filteredArchives
-      .map((a) => `${a.name}: ${a.searchUrl(normalizedUrl, date || undefined)}`)
-      .join('\n');
-    navigator.clipboard.writeText(links);
-    setCopiedId('__all__');
-    setTimeout(() => setCopiedId(null), 2000);
+  const revisit = (url: string) => {
+    setInput(url);
+    navigate("search");
   };
-
-  // Export report generation
-  const generateReport = useMemo(() => {
-    if (!isValidUrl) return '';
-
-    const dateLabel = date ? `\n**Date:** ${date}` : '';
-    const timestamp = new Date().toISOString().split('T')[0];
-
-    if (exportFormat === 'json') {
-      const data = {
-        url: normalizedUrl,
-        date: date || null,
-        generatedAt: new Date().toISOString(),
-        totalArchives: filteredArchives.length,
-        checkedCount: totalChecked,
-        results: filteredArchives.map((a) => ({
-          name: a.name,
-          country: a.country,
-          category: a.category,
-          checked: checkedArchives.has(a.id),
-          searchUrl: a.searchUrl(normalizedUrl, date || undefined),
-          homepage: a.homepage,
-        })),
-      };
-      return JSON.stringify(data, null, 2);
-    }
-
-    const checked = filteredArchives.filter((a) => checkedArchives.has(a.id));
-    const unchecked = filteredArchives.filter((a) => !checkedArchives.has(a.id));
-
-    if (exportFormat === 'markdown') {
-      return `# Web Archive Search Report
-
-**URL:** ${normalizedUrl}${dateLabel}
-**Generated:** ${timestamp}
-**Total Archives:** ${filteredArchives.length}
-**Checked:** ${checked.length} / ${filteredArchives.length}
-
-## ✅ Checked (${checked.length})
-
-${checked.length > 0 ? checked.map((a) => `- [${a.flag} **${a.name}**](${a.searchUrl(normalizedUrl, date || undefined)}) — ${a.country}`).join('\n') : '_None yet_'}
-
-## ⬜ Not Yet Checked (${unchecked.length})
-
-${unchecked.length > 0 ? unchecked.map((a) => `- [${a.flag} ${a.name}](${a.searchUrl(normalizedUrl, date || undefined)}) — ${a.country}`).join('\n') : '_All checked!_'}
-
----
-_Generated by Web Archive Searcher_`;
-    }
-
-    // text format
-    return `WEB ARCHIVE SEARCH REPORT
-==========================
-URL: ${normalizedUrl}${dateLabel}
-Generated: ${timestamp}
-Total Archives: ${filteredArchives.length}
-Checked: ${checked.length} / ${filteredArchives.length}
-
-CHECKED (${checked.length})
-${checked.length > 0 ? checked.map((a) => `  [✓] ${a.name} (${a.country})\n      ${a.searchUrl(normalizedUrl, date || undefined)}`).join('\n\n') : '  (none yet)'}
-
-NOT YET CHECKED (${unchecked.length})
-${unchecked.length > 0 ? unchecked.map((a) => `  [ ] ${a.name} (${a.country})\n      ${a.searchUrl(normalizedUrl, date || undefined)}`).join('\n\n') : '  (all checked!)'}
-
----
-Generated by Web Archive Searcher`;
-  }, [isValidUrl, normalizedUrl, date, filteredArchives, checkedArchives, exportFormat]);
-
-  const totalChecked = filteredArchives.filter((a) => checkedArchives.has(a.id)).length;
-  const totalFiltered = filteredArchives.length;
-  const progress = totalFiltered > 0 ? Math.round((totalChecked / totalFiltered) * 100) : 0;
-
-  const handleRemoveRecent = (recentUrl: string) => {
-    setRecentUrls((prev) => {
-      const updated = prev.filter((u) => u !== recentUrl);
-      saveToStorage(STORAGE_KEYS.recentUrls, updated);
-      return updated;
-    });
-  };
-
-  const handleClearAllChecked = () => {
-    setCheckedArchives(new Set());
-  };
+  const renderSource = (archive: ArchiveService) => (
+    <article
+      className={`source-row ${compact ? "is-compact" : ""}`}
+      key={archive.id}
+    >
+      <div className="source-identity">
+        <Globe size={23} strokeWidth={1.5} />
+        <div>
+          <h3>{archive.name}</h3>
+          <span className="source-country">
+            {archive.country} ·{" "}
+            {automaticArchiveIds.some((id) => id === archive.id)
+              ? "Automatic lookup"
+              : "Manual lookup"}
+          </span>
+          {!compact && (
+            <>
+              <p>{archive.description}</p>
+              {archive.instructions && (
+                <p className="source-instructions">{archive.instructions}</p>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      <div className="source-actions">
+        {valid && (
+          <button
+            className={`review-button ${checked.has(archive.id) ? "is-reviewed" : ""}`}
+            aria-pressed={checked.has(archive.id)}
+            onClick={() => toggle(archive.id)}
+          >
+            <Check size={15} />
+            {checked.has(archive.id) ? "Reviewed" : "Mark reviewed"}
+          </button>
+        )}
+        <a
+          href={
+            valid
+              ? archive.searchUrl(target.canonicalUrl, manualDate || undefined)
+              : archive.homepage
+          }
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={() => {
+            if (valid) remember(target.canonicalUrl);
+          }}
+        >
+          {archive.linkLabel || (valid ? "Open search" : "Visit source")}
+          <ExternalLink size={16} />
+        </a>
+        {valid && (
+          <button
+            className="icon-button"
+            aria-label={`Copy ${archive.name} search URL`}
+            onClick={() =>
+              void copy(
+                archive.searchUrl(target.canonicalUrl, manualDate || undefined),
+              )
+            }
+          >
+            <Copy size={16} />
+          </button>
+        )}
+      </div>
+    </article>
+  );
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
-      {/* Header */}
-      <header className="border-b border-slate-700/50 bg-slate-900/80 backdrop-blur-sm sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="text-3xl">🕸️</div>
-            <div>
-              <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-                Web Archive Searcher
-              </h1>
-              <p className="text-xs text-slate-400">Search across {archives.length}+ internet archives worldwide</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-4">
-            {isValidUrl && (
-              <div className="hidden sm:flex items-center gap-3">
-                <div className="text-right">
-                  <p className="text-xs text-slate-400">Progress</p>
-                  <p className="text-sm font-semibold text-emerald-400">{totalChecked}/{totalFiltered} checked</p>
-                </div>
-                <div className="w-20 h-2 bg-slate-700 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-emerald-500 to-blue-500 rounded-full transition-all duration-300"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-              </div>
-            )}
-            {/* View Toggle */}
-            <div className="flex items-center bg-slate-800 rounded-lg border border-slate-700/50 overflow-hidden">
-              <button
-                onClick={() => setViewMode('compact')}
-                className={`px-2.5 py-1.5 text-xs transition-all ${
-                  viewMode === 'compact' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-                title="Compact view"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                </svg>
-              </button>
-              <button
-                onClick={() => setViewMode('detailed')}
-                className={`px-2.5 py-1.5 text-xs transition-all ${
-                  viewMode === 'detailed' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-                title="Detailed view"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-                </svg>
-              </button>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto px-4 py-8">
-        {/* Search Input Section */}
-        <div className="mb-6">
-          <div className="bg-slate-800/50 rounded-2xl border border-slate-700/50 p-6 backdrop-blur-sm">
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              Enter a URL to generate search links for all web archives
-            </label>
-            <div className="flex gap-3 flex-col sm:flex-row">
-              <div className="flex-1 relative">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                  </svg>
-                </span>
+    <div className="research-app">
+      <a href="#main" className="skip-link">
+        Skip to content
+      </a>
+      <aside className="sidebar" aria-label="Main navigation">
+        <a
+          className="brand"
+          href="#search"
+          onClick={(e) => {
+            e.preventDefault();
+            navigate("search");
+          }}
+        >
+          <Layers size={37} strokeWidth={1.5} />
+          <span>
+            <strong>
+              Archive <br />
+              Research
+            </strong>
+            <small>Research Desk</small>
+          </span>
+        </a>
+        <nav>
+          {(
+            [
+              { id: "search", text: "Search", Icon: Search },
+              { id: "history", text: "History", Icon: History },
+              { id: "sources", text: "Sources", Icon: Layers },
+            ] as const
+          ).map(({ id, text, Icon }) => (
+            <button
+              key={id}
+              className={`nav-item ${page === id ? "active" : ""}`}
+              aria-current={page === id ? "page" : undefined}
+              onClick={() => navigate(id)}
+            >
+              <Icon size={27} strokeWidth={1.6} />
+              <span>{text}</span>
+            </button>
+          ))}
+        </nav>
+      </aside>
+      <main id="main" className={`workspace page-${page}`}>
+        {page === "search" && (
+          <>
+            <header className="page-heading">
+              <h1>Find what the web remembers</h1>
+              <p>
+                Look up web pages, documents, and videos in major web archives.
+              </p>
+            </header>
+            <form
+              className="lookup-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runCheck();
+              }}
+            >
+              <div className="input-wrap">
+                <LinkIcon size={27} strokeWidth={1.6} />
                 <input
-                  type="text"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://example.com/page"
-                  className="w-full pl-12 pr-4 py-3.5 bg-slate-900/80 border border-slate-600/50 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50 transition-all"
+                  ref={inputRef}
+                  aria-label="URL to search"
+                  placeholder="Paste a URL or YouTube video ID"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  spellCheck={false}
+                  autoComplete="off"
                 />
+                {input && (
+                  <button
+                    type="button"
+                    className="clear-input"
+                    aria-label="Clear URL"
+                    onClick={() => {
+                      setInput("");
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    <X size={16} />
+                  </button>
+                )}
               </div>
-              {/* Date Picker */}
-              <div className="relative sm:w-48">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
-                </span>
-                <input
-                  type="date"
-                  value={date}
-                  onChange={(e) => setDate(e.target.value)}
-                  className="w-full pl-9 pr-3 py-3.5 bg-slate-900/80 border border-slate-600/50 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50 transition-all [color-scheme:dark]"
-                  title="Optional: search for a specific date (supported by some archives)"
-                />
-              </div>
-            </div>
-
-            {/* Action buttons row */}
-            <div className="flex flex-wrap gap-2 mt-3">
               <button
-                onClick={handleCopyAllLinks}
-                disabled={!isValidUrl}
-                className="px-4 py-2 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 disabled:from-slate-600 disabled:to-slate-600 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-all shadow-lg shadow-blue-500/20 disabled:shadow-none flex items-center gap-2"
+                className="primary-button"
+                type="submit"
+                disabled={!valid || checking}
               >
-                {copiedId === '__all__' ? (
+                {checking ? (
                   <>
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                    Copied!
+                    <Loader2 className="spin" size={23} />
+                    Checking…
                   </>
                 ) : (
-                  <>
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-                    </svg>
-                    Copy All Links
-                  </>
+                  "Check archives"
                 )}
               </button>
-              <button
-                onClick={() => setShowExport(!showExport)}
-                disabled={!isValidUrl}
-                className="px-4 py-2 bg-slate-700/50 hover:bg-slate-700 disabled:bg-slate-800 disabled:text-slate-600 text-slate-300 text-sm font-medium rounded-lg transition-all flex items-center gap-2 border border-slate-600/50 disabled:border-slate-700/30"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                Export Report
-              </button>
-              {totalChecked > 0 && (
-                <button
-                  onClick={handleClearAllChecked}
-                  className="px-4 py-2 bg-red-900/30 hover:bg-red-900/50 text-red-400 text-sm font-medium rounded-lg transition-all flex items-center gap-2 border border-red-700/30"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                  Clear All ({totalChecked})
-                </button>
-              )}
-            </div>
-
-            {/* Date info */}
-            {date && isValidUrl && (
-              <p className="mt-2 text-xs text-amber-400">
-                📅 Searching for snapshots from <strong>{date}</strong> — supported by Wayback Machine, archive.today, Arquivo.pt, and Memento
-              </p>
-            )}
-
-            {url && !isValidUrl && (
-              <p className="mt-2 text-sm text-amber-400">⚠ Please enter a valid URL (e.g., example.com or https://example.com)</p>
-            )}
-            {isValidUrl && !date && (
-              <p className="mt-2 text-sm text-emerald-400">
-                ✓ Ready — click "Open" on any archive to review results at your own pace
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* Export Panel */}
-        {showExport && isValidUrl && (
-          <div className="mb-6 bg-slate-800/50 rounded-2xl border border-slate-700/50 p-5 backdrop-blur-sm">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                <span>📤</span> Export Report
-              </h3>
-              <div className="flex items-center gap-2">
-                <select
-                  value={exportFormat}
-                  onChange={(e) => setExportFormat(e.target.value as 'markdown' | 'text' | 'json')}
-                  className="bg-slate-900 border border-slate-600/50 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                >
-                  <option value="markdown">Markdown</option>
-                  <option value="text">Plain Text</option>
-                  <option value="json">JSON</option>
-                </select>
-                <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(generateReport);
-                    setCopiedId('__export__');
-                    setTimeout(() => setCopiedId(null), 2000);
-                  }}
-                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-lg transition-all flex items-center gap-1.5"
-                >
-                  {copiedId === '__export__' ? '✓ Copied!' : 'Copy'}
-                </button>
-                <button
-                  onClick={() => {
-                    const ext = exportFormat === 'json' ? 'json' : exportFormat === 'markdown' ? 'md' : 'txt';
-                    const blob = new Blob([generateReport], { type: 'text/plain' });
-                    const a = document.createElement('a');
-                    a.href = URL.createObjectURL(blob);
-                    a.download = `web-archive-report-${Date.now()}.${ext}`;
-                    a.click();
-                    URL.revokeObjectURL(a.href);
-                  }}
-                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition-all flex items-center gap-1.5"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                  </svg>
-                  Download
-                </button>
-              </div>
-            </div>
-            <pre className="bg-slate-900/80 rounded-lg p-4 text-xs text-slate-300 overflow-auto max-h-64 font-mono border border-slate-700/30">
-              {generateReport}
-            </pre>
-          </div>
-        )}
-
-        {/* Recent Searches */}
-        {recentUrls.length > 0 && (
-          <div className="mb-6">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs text-slate-500 uppercase tracking-wider font-medium">Recent Searches</span>
-              <button
-                onClick={() => {
-                  setRecentUrls([]);
-                  saveToStorage(STORAGE_KEYS.recentUrls, []);
-                }}
-                className="text-xs text-slate-600 hover:text-slate-400 transition-colors"
-              >
-                clear
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {recentUrls.map((recentUrl) => (
-                <div
-                  key={recentUrl}
-                  className="group flex items-center gap-1 bg-slate-800/50 border border-slate-700/40 rounded-lg px-3 py-1.5 hover:border-slate-600/60 transition-all"
-                >
-                  <button
-                    onClick={() => setUrl(recentUrl.replace(/^https?:\/\//, ''))}
-                    className="text-xs text-slate-300 hover:text-white transition-colors truncate max-w-[200px]"
-                    title={recentUrl}
-                  >
-                    {recentUrl.replace(/^https?:\/\//, '')}
-                  </button>
-                  <button
-                    onClick={() => handleRemoveRecent(recentUrl)}
-                    className="text-slate-600 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100"
-                    title="Remove"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Filters */}
-        <div className="mb-6 flex flex-col sm:flex-row gap-4">
-          <div className="flex-1">
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() => setSelectedCategory('all')}
-                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
-                  selectedCategory === 'all'
-                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
-                    : 'bg-slate-700/50 text-slate-300 hover:bg-slate-700'
-                }`}
-              >
-                🌐 All ({archives.length})
-              </button>
-              {categories.map((cat) => {
-                const count = archives.filter((a) => a.category === cat.id).length;
-                return (
-                  <button
-                    key={cat.id}
-                    onClick={() => setSelectedCategory(cat.id)}
-                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
-                      selectedCategory === cat.id
-                        ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
-                        : 'bg-slate-700/50 text-slate-300 hover:bg-slate-700'
-                    }`}
-                  >
-                    {cat.icon} {cat.name} ({count})
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          <div className="sm:w-64">
-            <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-              </span>
-              <input
-                type="text"
-                value={searchFilter}
-                onChange={(e) => setSearchFilter(e.target.value)}
-                placeholder="Filter archives..."
-                className="w-full pl-9 pr-4 py-2 bg-slate-800/80 border border-slate-700/50 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Archive Groups */}
-        <div className="space-y-8">
-          {categories
-            .filter((cat) => groupedArchives[cat.id]?.length > 0)
-            .map((category) => (
-              <div key={category.id}>
-                <h2 className="text-lg font-semibold text-slate-200 mb-4 flex items-center gap-2">
-                  <span className="text-xl">{category.icon}</span>
-                  {category.name}
-                  <span className="text-sm font-normal text-slate-400">({groupedArchives[category.id].length})</span>
-                </h2>
-                <div className={viewMode === 'detailed' ? 'space-y-2' : 'space-y-1'}>
-                  {groupedArchives[category.id].map((archive) => (
-                    <ArchiveRow
-                      key={archive.id}
-                      archive={archive}
-                      isValidUrl={isValidUrl}
-                      normalizedUrl={normalizedUrl}
-                      date={date}
-                      isChecked={checkedArchives.has(archive.id)}
-                      isCopied={copiedId === archive.id}
-                      viewMode={viewMode}
-                      onToggle={() => handleToggleCheck(archive.id)}
-                      onCopy={() => handleCopyLink(archive)}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-        </div>
-
-        {/* Empty state */}
-        {filteredArchives.length === 0 && (
-          <div className="text-center py-12">
-            <div className="text-4xl mb-4">🔍</div>
-            <p className="text-slate-400">No archives match your filter criteria</p>
-          </div>
-        )}
-
-        {/* Info Section */}
-        <div className="mt-12 bg-slate-800/30 rounded-2xl border border-slate-700/30 p-6">
-          <h3 className="text-lg font-semibold text-slate-200 mb-3 flex items-center gap-2">
-            <span>ℹ️</span> How to Use
-          </h3>
-          <div className="text-sm text-slate-400 space-y-3">
-            <div className="flex gap-3 items-start">
-              <span className="flex-shrink-0 w-6 h-6 bg-blue-600/30 text-blue-400 rounded-full flex items-center justify-center text-xs font-bold">1</span>
-              <p>Enter any URL in the search box above (e.g., <code className="bg-slate-700/50 px-1.5 py-0.5 rounded text-xs text-slate-300">example.com</code>)</p>
-            </div>
-            <div className="flex gap-3 items-start">
-              <span className="flex-shrink-0 w-6 h-6 bg-blue-600/30 text-blue-400 rounded-full flex items-center justify-center text-xs font-bold">2</span>
-              <p>Optionally pick a <strong className="text-amber-400">📅 date</strong> to see how the page looked at a specific time (Wayback Machine, archive.today, Arquivo.pt support this)</p>
-            </div>
-            <div className="flex gap-3 items-start">
-              <span className="flex-shrink-0 w-6 h-6 bg-blue-600/30 text-blue-400 rounded-full flex items-center justify-center text-xs font-bold">3</span>
-              <p>Click <strong className="text-blue-400">"Open"</strong> on any archive to open its search page in a new tab — review the results at your own pace</p>
-            </div>
-            <div className="flex gap-3 items-start">
-              <span className="flex-shrink-0 w-6 h-6 bg-blue-600/30 text-blue-400 rounded-full flex items-center justify-center text-xs font-bold">4</span>
-              <p>Use the <strong className="text-emerald-400">checkbox</strong> to mark archives you've already checked — progress is saved automatically</p>
-            </div>
-            <div className="flex gap-3 items-start">
-              <span className="flex-shrink-0 w-6 h-6 bg-blue-600/30 text-blue-400 rounded-full flex items-center justify-center text-xs font-bold">5</span>
-              <p>Use <strong className="text-purple-400">"Export Report"</strong> to generate a shareable report of your findings (Markdown, Text, or JSON)</p>
-            </div>
-          </div>
-          <div className="mt-4 p-3 bg-slate-900/50 rounded-lg border border-slate-700/30">
-            <p className="text-xs text-slate-500">
-              💡 <strong className="text-slate-400">Deployment:</strong> This is a fully static site — works on GitHub Pages, Vercel, Netlify, or any static host. No server needed.
-            </p>
-          </div>
-        </div>
-      </main>
-
-      {/* Footer */}
-      <footer className="border-t border-slate-700/30 mt-12 py-6">
-        <div className="max-w-7xl mx-auto px-4 text-center text-sm text-slate-500">
-          <p>Web Archive Searcher — {archives.length}+ internet archives at your fingertips</p>
-        </div>
-      </footer>
-    </div>
-  );
-}
-
-function ArchiveRow({
-  archive,
-  isValidUrl,
-  normalizedUrl,
-  date,
-  isChecked,
-  isCopied,
-  viewMode,
-  onToggle,
-  onCopy,
-}: {
-  archive: ArchiveService;
-  isValidUrl: boolean;
-  normalizedUrl: string;
-  date: string;
-  isChecked: boolean;
-  isCopied: boolean;
-  viewMode: ViewMode;
-  onToggle: () => void;
-  onCopy: () => void;
-}) {
-  const searchUrl = isValidUrl ? archive.searchUrl(normalizedUrl, date || undefined) : null;
-
-  if (viewMode === 'compact') {
-    return (
-      <div
-        className={`group rounded-lg border transition-all ${
-          isChecked
-            ? 'bg-emerald-900/10 border-emerald-700/30'
-            : 'bg-slate-800/30 border-slate-700/30 hover:border-slate-600/50 hover:bg-slate-800/50'
-        }`}
-      >
-        <div className="flex items-center gap-2 px-3 py-2">
-          {/* Checkbox */}
-          <button
-            onClick={onToggle}
-            className={`flex-shrink-0 w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${
-              isChecked
-                ? 'bg-emerald-500 border-emerald-500 text-white'
-                : 'border-slate-600 hover:border-slate-400'
-            }`}
-          >
-            {isChecked && (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-              </svg>
-            )}
-          </button>
-
-          <span className="text-sm">{archive.flag}</span>
-          <span className={`text-xs font-medium truncate flex-1 ${isChecked ? 'text-emerald-300' : 'text-slate-300'}`}>
-            {archive.name}
-          </span>
-          <span className="text-[10px] text-slate-600 hidden md:inline">{archive.country}</span>
-
-          {/* Actions */}
-          <div className="flex items-center gap-1 flex-shrink-0">
-            <button
-              onClick={onCopy}
-              disabled={!isValidUrl}
-              className={`p-1.5 rounded transition-all ${
-                isCopied
-                  ? 'text-emerald-400'
-                  : 'text-slate-600 hover:text-slate-300 disabled:text-slate-700'
-              }`}
-              title="Copy search URL"
-            >
-              {isCopied ? (
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
+            </form>
+            <div className="input-context">
+              {valid ? (
+                <>
+                  {videoTarget ? (
+                    <Youtube size={29} strokeWidth={1.6} />
+                  ) : (
+                    <Globe size={27} strokeWidth={1.6} />
+                  )}
+                  <span>
+                    Detected: <strong>{label}</strong>
+                  </span>
+                </>
               ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                </svg>
+                <span>
+                  {input
+                    ? target.kind === "query"
+                      ? "Enter a URL or video ID. Keyword discovery is not supported yet."
+                      : "Enter a valid web URL or YouTube video ID."
+                    : "Try a website address, document link, or YouTube video ID."}
+                </span>
               )}
-            </button>
-            <a
-              href={isValidUrl ? searchUrl! : undefined}
-              target="_blank"
-              rel="noopener noreferrer"
-              className={`px-2 py-1 rounded text-[10px] font-medium transition-all ${
-                isValidUrl
-                  ? 'bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 border border-blue-500/30'
-                  : 'bg-slate-700/30 text-slate-600 border border-slate-600/30 cursor-not-allowed'
-              }`}
+            </div>
+            <section
+              className="results-section"
+              aria-labelledby="results-heading"
             >
-              Open
-            </a>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Detailed view
-  return (
-    <div
-      className={`group rounded-xl border transition-all ${
-        isChecked
-          ? 'bg-emerald-900/10 border-emerald-700/30'
-          : 'bg-slate-800/40 border-slate-700/40 hover:border-slate-600/60 hover:bg-slate-800/60'
-      }`}
-    >
-      <div className="flex items-center gap-3 p-3 sm:p-4">
-        {/* Checkbox */}
-        <button
-          onClick={onToggle}
-          className={`flex-shrink-0 w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all ${
-            isChecked
-              ? 'bg-emerald-500 border-emerald-500 text-white'
-              : 'border-slate-600 hover:border-slate-400'
-          }`}
-          title={isChecked ? 'Mark as unchecked' : 'Mark as checked'}
-        >
-          {isChecked && (
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-            </svg>
-          )}
-        </button>
-
-        {/* Info */}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-base">{archive.flag}</span>
-            <h3 className={`font-semibold text-sm ${isChecked ? 'text-emerald-300' : 'text-slate-200'}`}>
-              {archive.name}
-            </h3>
-            <span className="text-[10px] bg-slate-700/50 text-slate-400 px-1.5 py-0.5 rounded hidden sm:inline">
-              {archive.country}
-            </span>
-            {archive.supportsDate && date && (
-              <span className="text-[10px] bg-amber-900/30 text-amber-400 px-1.5 py-0.5 rounded flex items-center gap-0.5">
-                📅 Date supported
-              </span>
-            )}
-          </div>
-          <p className="text-xs text-slate-500 mt-0.5 truncate">{archive.description}</p>
-          {searchUrl && (
-            <p className="text-[10px] text-slate-600 truncate font-mono mt-1" title={searchUrl}>
-              → {searchUrl}
+              <div className="section-heading">
+                <h2 id="results-heading">Archive results</h2>
+                <p role="status" aria-live="polite">
+                  {checking
+                    ? `${foundCount} ${foundCount === 1 ? "match" : "matches"} found · checking archives…`
+                    : hasResults
+                      ? `${foundCount} ${foundCount === 1 ? "match" : "matches"} found`
+                      : "Check a URL to find preserved copies."}
+                </p>
+              </div>
+              <div className="result-list">
+                {automaticArchiveIds.map((id) => {
+                  const result = results[id];
+                  const archive = archives.find((a) => a.id === id)!;
+                  const open = expanded === id;
+                  return (
+                    <div className="result-item" key={id}>
+                      <div className="result-row">
+                        <button
+                          className="provider-name"
+                          aria-expanded={open}
+                          aria-controls={`details-${id}`}
+                          onClick={() => setExpanded(open ? null : id)}
+                        >
+                          <SourceIcon id={id} />
+                          <span>
+                            {id === "wayback"
+                              ? "Wayback Machine"
+                              : "Arquivo.pt"}
+                          </span>
+                        </button>
+                        <div className="capture-date">
+                          <span>
+                            {result?.status === "found"
+                              ? "Captured"
+                              : "Availability"}
+                          </span>
+                          <strong>
+                            {result?.status === "found"
+                              ? captureDate(result.timestamp)
+                              : result?.status === "checking"
+                                ? "Checking…"
+                                : "All dates"}
+                          </strong>
+                        </div>
+                        <div
+                          className={`result-state state-${result?.status || "idle"}`}
+                        >
+                          {result?.status === "found" ? (
+                            <CheckCircle2 size={28} strokeWidth={1.8} />
+                          ) : result?.status === "checking" ? (
+                            <Loader2 className="spin" size={25} />
+                          ) : result?.status === "error" ? (
+                            <AlertCircle size={25} />
+                          ) : (
+                            <span className="state-dot" aria-hidden="true" />
+                          )}
+                          <span>{resultLabel(result)}</span>
+                        </div>
+                        <div className="result-action">
+                          {result?.snapshotUrl ? (
+                            <a
+                              href={result.snapshotUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              View snapshot
+                              <ExternalLink size={20} />
+                            </a>
+                          ) : valid ? (
+                            <a
+                              href={archive.searchUrl(target.canonicalUrl)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              Search manually
+                              <ExternalLink size={18} />
+                            </a>
+                          ) : (
+                            <span>Awaiting URL</span>
+                          )}
+                        </div>
+                      </div>
+                      {result?.status === "error" && (
+                        <p className="result-error">{result.message}</p>
+                      )}
+                      {open && (
+                        <div className="result-details" id={`details-${id}`}>
+                          <p>
+                            <strong>
+                              {result?.status === "found"
+                                ? "Archive evidence"
+                                : "Lookup details"}
+                            </strong>
+                          </p>
+                          <p>
+                            {result?.message ||
+                              "This provider has not been checked for the current URL."}
+                          </p>
+                          {result?.queriedUrl && (
+                            <p>
+                              Queried URL:{" "}
+                              <span className="break-url">
+                                {result.queriedUrl}
+                              </span>
+                            </p>
+                          )}
+                          {result?.checkedAt && (
+                            <p>
+                              Checked:{" "}
+                              {new Date(result.checkedAt).toLocaleString(
+                                "en-GB",
+                              )}
+                            </p>
+                          )}
+                          {result?.attemptedUrls && (
+                            <p>
+                              {result.attemptedUrls.length} URL{" "}
+                              {result.attemptedUrls.length === 1
+                                ? "form"
+                                : "forms"}{" "}
+                              checked.
+                            </p>
+                          )}
+                          <p>Opening a result does not mark it reviewed.</p>
+                          <button
+                            disabled={!valid}
+                            className={`review-button ${checked.has(id) ? "is-reviewed" : ""}`}
+                            aria-pressed={checked.has(id)}
+                            onClick={() => toggle(id)}
+                          >
+                            <Check size={16} />
+                            {checked.has(id) ? "Reviewed" : "Mark reviewed"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="evidence-note">
+                {videoTarget
+                  ? "Video file not verified."
+                  : "An archive record confirms a capture, not the completeness of its contents."}
+              </p>
+              {hasResults && !checking && foundCount === 0 && (
+                <p className="lookup-explanation">
+                  No confirmed copies were returned by these two services. Other
+                  archives may still hold this URL.
+                </p>
+              )}
+            </section>
+            <section
+              className="manual-section"
+              aria-labelledby="manual-heading"
+            >
+              <h2 id="manual-heading">Search manually</h2>
+              <div className="manual-links">
+                <span>Try additional archives for this URL:</span>
+                {manualSources.map((archive) =>
+                  valid ? (
+                    <a
+                      key={archive.id}
+                      href={archive.searchUrl(
+                        target.canonicalUrl,
+                        manualDate || undefined,
+                      )}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => remember(target.canonicalUrl)}
+                    >
+                      <ExternalLink size={19} />
+                      {archive.name}
+                    </a>
+                  ) : (
+                    <a
+                      key={archive.id}
+                      href={archive.homepage}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <ExternalLink size={19} />
+                      {archive.name}
+                    </a>
+                  ),
+                )}
+              </div>
+              <details className="advanced-options">
+                <summary>
+                  More sources & search options
+                  <ChevronDown size={15} />
+                </summary>
+                <div>
+                  <label>
+                    Preferred date for manual searches
+                    <input
+                      type="date"
+                      value={manualDate}
+                      onChange={(e) => setManualDate(e.target.value)}
+                    />
+                  </label>
+                  <p>
+                    Automatic checks cover all dates. Manual date support varies
+                    by source and may return the nearest capture.
+                  </p>
+                  <button
+                    className="text-button"
+                    onClick={() => navigate("sources")}
+                  >
+                    Browse all {archives.length} sources
+                    <ArrowRight size={16} />
+                  </button>
+                </div>
+              </details>
+            </section>
+          </>
+        )}
+        {page === "history" && (
+          <>
+            <header className="page-heading">
+              <h1>Your research trail</h1>
+              <p>Return to previous targets and pick up where you left off.</p>
+            </header>
+            <div className="page-toolbar">
+              <div className="filter-input">
+                <Search size={20} />
+                <input
+                  aria-label="Filter history"
+                  placeholder="Find a URL or video…"
+                  value={historyFilter}
+                  onChange={(e) => setHistoryFilter(e.target.value)}
+                />
+              </div>
+              <button className="secondary-button" onClick={exportBackup}>
+                <Download size={18} />
+                Export backup
+              </button>
+              <button
+                className="secondary-button"
+                onClick={() => fileRef.current?.click()}
+              >
+                <Upload size={18} />
+                Import backup
+              </button>
+            </div>
+            <p className="muted">
+              {recent.length} saved {recent.length === 1 ? "target" : "targets"}{" "}
+              · Stored in this browser. Import a backup to move history from
+              localhost or another device.
             </p>
-          )}
-        </div>
-
-        {/* Actions */}
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          <a
-            href={archive.homepage}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="p-2 text-slate-500 hover:text-slate-300 hover:bg-slate-700/50 rounded-lg transition-all"
-            title="Visit homepage"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-            </svg>
-          </a>
-          <button
-            onClick={onCopy}
-            disabled={!isValidUrl}
-            className={`p-2 rounded-lg transition-all ${
-              isCopied
-                ? 'text-emerald-400 bg-emerald-500/20'
-                : 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/50 disabled:text-slate-700 disabled:hover:bg-transparent'
-            }`}
-            title="Copy search URL"
-          >
-            {isCopied ? (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-              </svg>
+            {legacy.length > 0 && (
+              <p className="information-note">
+                {legacy.length} earlier global checklist marks are preserved in
+                backups. Their original targets are unknown, so they are kept
+                separate.
+              </p>
             )}
-          </button>
-          <a
-            href={isValidUrl ? searchUrl! : undefined}
-            target="_blank"
-            rel="noopener noreferrer"
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
-              isValidUrl
-                ? 'bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 border border-blue-500/30'
-                : 'bg-slate-700/30 text-slate-600 border border-slate-600/30 cursor-not-allowed'
-            }`}
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-            </svg>
-            Open
-          </a>
-        </div>
-      </div>
+            <div className="history-list">
+              {recent
+                .filter((url) =>
+                  url.toLowerCase().includes(historyFilter.toLowerCase()),
+                )
+                .map((url) => {
+                  const item = parseTarget(url);
+                  const count = reviewedForTarget(reviewed, item.key).size;
+                  return (
+                    <article className="history-row" key={url}>
+                      <span className="history-icon">
+                        {item.kind.startsWith("youtube") ? (
+                          <Video size={25} />
+                        ) : (
+                          <FileText size={25} />
+                        )}
+                      </span>
+                      <button
+                        className="history-target"
+                        onClick={() => revisit(url)}
+                      >
+                        <strong>{url.replace(/^https?:\/\//, "")}</strong>
+                        <span>
+                          {item.kind.replace(/-/g, " ")} · {count}{" "}
+                          {count === 1 ? "source" : "sources"} reviewed
+                        </span>
+                      </button>
+                      <button
+                        className="icon-button"
+                        aria-label={`Remove ${url} from recent history`}
+                        onClick={() =>
+                          setRecent((prev) => prev.filter((u) => u !== url))
+                        }
+                      >
+                        <X size={19} />
+                      </button>
+                    </article>
+                  );
+                })}
+            </div>
+            {recent.length === 0 && (
+              <div className="empty-state">
+                <History size={34} strokeWidth={1.4} />
+                <h2>A place for your next discovery</h2>
+                <p>Checked targets and reviewed sources will appear here.</p>
+                <button
+                  className="text-button"
+                  onClick={() => navigate("search")}
+                >
+                  Start a lookup
+                  <ArrowRight size={17} />
+                </button>
+              </div>
+            )}
+            {recent.length > 0 &&
+              recent.filter((url) =>
+                url.toLowerCase().includes(historyFilter.toLowerCase()),
+              ).length === 0 && (
+                <p className="empty-state">
+                  No history entries match this filter.
+                </p>
+              )}
+          </>
+        )}
+        {page === "sources" && (
+          <>
+            <header className="page-heading">
+              <h1>Follow the sources</h1>
+              <p>
+                Explore {archives.length} archive and research tools. Two
+                support automatic lookups.
+              </p>
+            </header>
+            {valid && (
+              <div className="current-target">
+                <LinkIcon size={19} />
+                <span>
+                  Searching for <strong>{target.canonicalUrl}</strong>
+                </span>
+                <button
+                  className="text-button"
+                  onClick={() => navigate("search")}
+                >
+                  Change URL
+                </button>
+              </div>
+            )}
+            <div className="page-toolbar">
+              <div className="filter-input">
+                <Search size={20} />
+                <input
+                  aria-label="Filter sources"
+                  placeholder="Filter sources or countries…"
+                  value={sourceFilter}
+                  onChange={(e) => setSourceFilter(e.target.value)}
+                />
+              </div>
+              <select
+                aria-label="Source category"
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+              >
+                <option value="all">All categories</option>
+                {categories.map((cat) => (
+                  <option value={cat.id} key={cat.id}>
+                    {cat.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="secondary-button"
+                aria-pressed={compact}
+                onClick={() => setCompact((v) => !v)}
+              >
+                {compact ? "Detailed view" : "Compact view"}
+              </button>
+            </div>
+            <div className="source-subtoolbar">
+              <p>
+                {filteredSources.length} sources · {checked.size} reviewed for
+                this target
+              </p>
+              <button
+                disabled={!valid}
+                className="text-button"
+                onClick={() => setShowReport((v) => !v)}
+              >
+                Export report
+                <Download size={16} />
+              </button>
+              <button
+                disabled={!valid}
+                className="text-button"
+                onClick={() =>
+                  void copy(
+                    filteredSources
+                      .map(
+                        (a) =>
+                          `${a.name}: ${a.searchUrl(target.canonicalUrl, manualDate || undefined)}`,
+                      )
+                      .join("\n"),
+                  )
+                }
+              >
+                Copy links
+                <Copy size={16} />
+              </button>
+            </div>
+            {showReport && valid && (
+              <section className="report-panel" aria-label="Export report">
+                <div className="report-toolbar">
+                  <h2>Export report</h2>
+                  <select
+                    aria-label="Report format"
+                    value={reportFormat}
+                    onChange={(e) =>
+                      setReportFormat(e.target.value as ReportFormat)
+                    }
+                  >
+                    <option value="markdown">Markdown</option>
+                    <option value="text">Plain text</option>
+                    <option value="json">JSON</option>
+                  </select>
+                  <button
+                    className="text-button"
+                    onClick={() => void copy(report)}
+                  >
+                    Copy
+                  </button>
+                  <button
+                    className="text-button"
+                    onClick={() =>
+                      download(
+                        report,
+                        `archive-research-report.${reportFormat === "markdown" ? "md" : reportFormat === "json" ? "json" : "txt"}`,
+                        reportFormat === "json"
+                          ? "application/json"
+                          : "text/plain",
+                      )
+                    }
+                  >
+                    Download
+                  </button>
+                </div>
+                <pre>{report}</pre>
+              </section>
+            )}
+            <div className="source-list">
+              {filteredSources.map(renderSource)}
+            </div>
+            {filteredSources.length === 0 && (
+              <p className="empty-state">No sources match these filters.</p>
+            )}
+            <p className="catalogue-note">
+              A listed service is a search lead, not a confirmed match. Access
+              and coverage vary; the full directory has not been independently
+              verified.
+            </p>
+          </>
+        )}
+        <footer className="workspace-footer">
+          <Database size={24} strokeWidth={1.5} />
+          <span>
+            History saved in this browser ·{" "}
+            <button className="inline-link" onClick={exportBackup}>
+              Export backup
+            </button>
+          </span>
+          {page !== "history" && (
+            <button
+              className="footer-import"
+              onClick={() => {
+                navigate("history");
+              }}
+            >
+              Import history
+            </button>
+          )}
+        </footer>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".json,application/json"
+          className="visually-hidden"
+          aria-label="Import history backup"
+          onChange={(e) => {
+            void importBackup(e.target.files?.[0]);
+            e.target.value = "";
+          }}
+        />
+        {notice && (
+          <div className="notice" role="status">
+            <span>{notice}</span>
+            <button
+              className="icon-button"
+              aria-label="Dismiss notification"
+              onClick={() => setNotice("")}
+            >
+              <X size={17} />
+            </button>
+          </div>
+        )}
+      </main>
     </div>
   );
 }
-
-export default App;
