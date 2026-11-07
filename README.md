@@ -26,18 +26,20 @@ npm run build
 ## What it does
 
 - Normalises website and YouTube URLs, including video IDs, short links, Shorts, live, and embed URLs.
-- Automatically checks Wayback availability and Arquivo.pt URL history, with bounded YouTube URL variants, timeouts, and a five-minute in-session response cache.
+- Automatically checks Wayback availability, Arquivo.pt URL history, and up to three recent Common Crawl indexes. Includes bounded YouTube URL variants for the first two providers, timeouts, and a five-minute in-session response cache. Common Crawl checks are serial, spaced, and pause after rate limiting. Its result is an index record, not a replayable snapshot; absence in recent indexes does not rule out older crawls.
 - Distinguishes archived watch-page records from verified video files. Video playback is not verified.
-- Offers manual searches across 41 archive/research tools, including Ghostarchive, Filmot, Archivarix Tube, and Quite a Playlist.
+- Offers manual searches across 42 archive/research tools, including Ghostarchive, Filmot, Archivarix Tube, and Quite a Playlist.
 - Saves review marks per target and keeps browser-local history; provides JSON backup/import and Markdown, text, and JSON reports.
 - Preserves earlier global checklist data separately because its original targets are unknown.
 
 History is stored in the browser, not a cloud database. To move from localhost to the hosted app, export a backup from History and import it on the hosted site. Neither the app nor Vercel automatically synchronises history between devices.
 
-The service catalogue is a directory of leads, not 41 verified automatic integrations. Availability and access vary by provider.
+The service catalogue is a directory of leads, not 42 verified automatic integrations. Availability and access vary by provider.
 
 ## Deployment
 
 The Vercel project is `surviving-sogice/archive-research`; the repository is `sergioroxo/Archive_Research`. See [deployment notes](DEPLOYMENT.md), [design QA](design-qa.md), and the [improvement roadmap](IMPROVEMENT_PLAN.md).
 
 No API secrets are required by the current browser-based lookups. Environment files and local Vercel linkage are excluded from Git.
+
+Google, Bing, and DuckDuckGo links search the live web for references and snippets; they do not check historical cached copies. Common Crawl gateway failures trigger a bounded fallback to another recent index. Incomplete scans remain errors, never global not-found claims.

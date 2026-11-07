@@ -95,6 +95,10 @@ function SourceIcon({ id, size = 34 }: { id: string; size?: number }) {
 }
 function resultLabel(result?: Availability) {
   if (!result) return "Not checked";
+  if (result.status === "found" && result.evidenceType === "crawl-record")
+    return "Crawl record found";
+  if (result.status === "not-found" && result.evidenceType === "crawl-record")
+    return "Not in checked crawls";
   if (result.status === "found")
     return result.evidenceType === "watch-page"
       ? "Watch page found"
@@ -336,7 +340,7 @@ export default function App() {
           "",
           ...reportRows.map(
             (row) =>
-              `${row.reviewed ? "[x]" : "[ ]"} ${row.source}\nStatus: ${row.availability.status}\n${row.searchUrl}${"snapshotUrl" in row.availability && row.availability.snapshotUrl ? `\nSnapshot: ${row.availability.snapshotUrl}` : ""}`,
+              `${row.reviewed ? "[x]" : "[ ]"} ${row.source}\nStatus: ${row.availability.status}\n${row.searchUrl}${"snapshotUrl" in row.availability && row.availability.snapshotUrl ? `\nSnapshot: ${row.availability.snapshotUrl}` : ""}${"recordUrl" in row.availability && row.availability.recordUrl ? `\nIndex record: ${row.availability.recordUrl}` : ""}${"scope" in row.availability && row.availability.scope ? `\nScope: ${row.availability.scope}` : ""}`,
           ),
         ].join("\n\n");
   const foundCount = Object.values(results).filter(
@@ -588,7 +592,7 @@ export default function App() {
                           <span>
                             {id === "wayback"
                               ? "Wayback Machine"
-                              : "Arquivo.pt"}
+                              : archive.name}
                           </span>
                         </button>
                         <div className="capture-date">
@@ -602,7 +606,9 @@ export default function App() {
                               ? captureDate(result.timestamp)
                               : result?.status === "checking"
                                 ? "Checking…"
-                                : "All dates"}
+                                : id === "common-crawl"
+                                  ? "3 recent crawls"
+                                  : "All dates"}
                           </strong>
                         </div>
                         <div
@@ -620,13 +626,15 @@ export default function App() {
                           <span>{resultLabel(result)}</span>
                         </div>
                         <div className="result-action">
-                          {result?.snapshotUrl ? (
+                          {result?.snapshotUrl || result?.recordUrl ? (
                             <a
-                              href={result.snapshotUrl}
+                              href={result.snapshotUrl || result.recordUrl}
                               target="_blank"
                               rel="noopener noreferrer"
                             >
-                              View snapshot
+                              {result.recordUrl
+                                ? "View index record"
+                                : "View snapshot"}
                               <ExternalLink size={20} />
                             </a>
                           ) : valid ? (
@@ -643,6 +651,14 @@ export default function App() {
                           )}
                         </div>
                       </div>
+                      {id === "common-crawl" && (
+                        <p className="provider-scope">
+                          {result?.scope ||
+                            "Checks up to 3 recent crawl indexes, not the full historical archive."}
+                          {result?.status === "found" &&
+                            " Index evidence only; no viewable snapshot or media file is verified."}
+                        </p>
+                      )}
                       {result?.status === "error" && (
                         <p className="result-error">{result.message}</p>
                       )}
@@ -675,6 +691,20 @@ export default function App() {
                               )}
                             </p>
                           )}
+                          {result?.checkedIndexes && (
+                            <p>
+                              Indexes checked:{" "}
+                              {result.checkedIndexes.join(", ") ||
+                                "None completed"}
+                            </p>
+                          )}
+                          {result?.failedIndexes &&
+                            result.failedIndexes.length > 0 && (
+                              <p>
+                                Indexes unavailable:{" "}
+                                {result.failedIndexes.join(", ")}
+                              </p>
+                            )}
                           {result?.attemptedUrls && (
                             <p>
                               {result.attemptedUrls.length} URL{" "}
@@ -707,8 +737,8 @@ export default function App() {
               </p>
               {hasResults && !checking && foundCount === 0 && (
                 <p className="lookup-explanation">
-                  No confirmed copies were returned by these two services. Other
-                  archives may still hold this URL.
+                  No confirmed records were returned within these lookup scopes.
+                  Other archives may still hold this URL.
                 </p>
               )}
             </section>
@@ -772,6 +802,33 @@ export default function App() {
                     Browse all {archives.length} sources
                     <ArrowRight size={16} />
                   </button>
+                  <p>
+                    Search engines can reveal references, reuploads, and
+                    snippets. These are live searches, not historical cache
+                    checks.
+                  </p>
+                  <div className="manual-links live-search-links">
+                    {["google-cache", "bing-cache", "duckduckgo-search"].map(
+                      (id) => {
+                        const engine = archives.find((a) => a.id === id)!;
+                        return (
+                          <a
+                            key={id}
+                            href={
+                              valid
+                                ? engine.searchUrl(target.canonicalUrl)
+                                : engine.homepage
+                            }
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            <ExternalLink size={16} />
+                            {engine.name.replace(" URL Search", "")}
+                          </a>
+                        );
+                      },
+                    )}
+                  </div>
                 </div>
               </details>
             </section>
@@ -886,7 +943,8 @@ export default function App() {
             <header className="page-heading">
               <h1>Follow the sources</h1>
               <p>
-                Explore {archives.length} archive and research tools. Two
+                Explore {archives.length} archive and research tools.{" "}
+                {automaticArchiveIds.length}
                 support automatic lookups.
               </p>
             </header>

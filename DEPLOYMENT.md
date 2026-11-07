@@ -15,7 +15,7 @@ Production URL: https://archive-research.vercel.app
 
 Run `npm test`, `npm run typecheck`, and `npm run build` before deployment. With the Vercel CLI installed and signed in, run `vercel project inspect` to verify the linked project, then `vercel deploy --prod --scope surviving-sogice` from this directory. Verify the returned production URL after deployment.
 
-The `.vercel` directory and environment files are ignored. Never commit them or include them in a history backup. The app requires no API secrets for its current two direct archive lookups.
+The `.vercel` directory and environment files are ignored. Never commit them or include them in a history backup. The app requires no API secrets for its current direct archive lookups.
 
 ## Move local history to the hosted app
 
@@ -32,7 +32,7 @@ A backup is a local file. Importing it does not upload it to Vercel or a databas
 
 ## Current lookup limits
 
-Automatic checks query Wayback availability and Arquivo.pt URL history, across all dates. YouTube inputs are canonicalised; up to four documented URL forms are checked sequentially per service. Provider errors stop further variants for that provider. Positive and negative responses are cached in memory for five minutes. A found watch page is not a verified video file. Ghostarchive and other directory entries are manual external lookups.
+Automatic checks query Wayback availability and Arquivo.pt URL history across all dates, plus up to three recent Common Crawl indexes. Common Crawl coverage is deliberately limited; negative results apply only to the indexes checked, and a found index record is not a viewable snapshot. It uses serial spaced requests, a 30-second total timeout, and a one-minute cooldown after rate limiting. Individual index requests have an 8-second budget; gateway failures try the next recent index. Any failed index makes an otherwise empty scan incomplete, rather than not-found. YouTube inputs are canonicalised; up to four documented URL forms are checked sequentially per service. Provider errors stop further variants for that provider. Positive and negative responses are cached in memory for five minutes. A found watch page is not a verified video file. Ghostarchive and other directory entries are manual external lookups.
 
 ## Follow-up work
 

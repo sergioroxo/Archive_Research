@@ -25,3 +25,15 @@ test('new tools encode full queries and use home pages for unrelated URLs', () =
   assert.equal(new URL(entry('quite-a-playlist').searchUrl(url)).searchParams.get('url'), url);
   for (const id of ['filmot', 'archivarix-tube', 'quite-a-playlist']) assert.equal(entry(id).searchUrl('https://example.com/document.rtf'), entry(id).homepage);
 });
+
+test('Google, Bing and DuckDuckGo handoffs preserve quoted URLs and are live searches', () => {
+  const url='https://example.com/file.rtf?a=1&b=two';
+  for(const id of ['google-cache','bing-cache','duckduckgo-search']){
+    const entry=archives.find(a=>a.id===id);
+    const link=new URL(entry.searchUrl(url));
+    assert.equal(link.searchParams.get('q'),`"${url}"`);
+    assert.equal(entry.category,'cache');
+    assert.match(entry.description,/live-web|live web/);
+    assert.doesNotMatch(link.href,/webcache|bingj/);
+  }
+});

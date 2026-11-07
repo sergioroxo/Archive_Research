@@ -27,3 +27,9 @@
 - GitHub source is sergioroxo/Archive_Research. Vercel is connected to its main branch for automatic deployments.
 
 The wider roadmap remains in IMPROVEMENT_PLAN.md. This pass delivers functional reliability and Vercel hosting, not the entire five-phase roadmap.
+
+## Additional automatic source
+
+Common Crawl is now an automatic provider. It checks up to three recent crawl indexes, labels index evidence separately, stops on service errors, and never treats an incomplete check as a global absence. Archive-It remains manual because its cross-collection CDX endpoint is temporarily blocked; no documented public Ghostarchive lookup API was found.
+
+The live-web search group now includes Google, Bing, and DuckDuckGo. These are explicitly not historical-cache checks. The catalogue contains 42 tools, of which three support automatic checks. The expanded regression suite has 27 passing tests.

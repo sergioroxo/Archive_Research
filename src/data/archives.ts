@@ -435,7 +435,7 @@ export const archives: ArchiveService[] = [
     category: 'cache',
     searchUrl: (url) => `https://www.google.com/search?q=${encodeURIComponent(`"${url}"`)}`,
     homepage: 'https://www.google.com',
-    notes: 'Google is phasing out direct cache access; use Google search instead',
+    instructions: 'Live search for references and snippets. Google no longer provides its former public cache operator.',
   },
   {
     id: 'bing-cache',
@@ -446,6 +446,17 @@ export const archives: ArchiveService[] = [
     category: 'cache',
     searchUrl: (url) => `https://www.bing.com/search?q=${encodeURIComponent(`"${url}"`)}`,
     homepage: 'https://www.bing.com',
+  },
+  {
+    id: 'duckduckgo-search',
+    name: 'DuckDuckGo URL Search',
+    description: 'Find live-web references and snippets for a URL; not a historical page-cache lookup',
+    country: 'International',
+    flag: '🌍',
+    category: 'cache',
+    searchUrl: (url) => `https://duckduckgo.com/?q=${encodeURIComponent(`"${url}"`)}`,
+    homepage: 'https://duckduckgo.com/',
+    instructions: 'Search results are discovery leads. A snippet does not confirm that the full page or file is preserved.',
   },
   {
     id: 'yandex-cache',

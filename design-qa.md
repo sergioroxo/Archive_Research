@@ -63,3 +63,7 @@ No actionable P0/P1/P2 mismatches remain.
 - [x] Compare desktop full view and focused results region; fix P2 drift.
 - [x] Verify mobile layout, core interactions, and console health.
 - [x] Pass tests and production build before release.
+
+## Subsequent functional extension
+
+Common Crawl adds a third result row using the same layout, typography, and status system. Its recent-index scope and index-record evidence type are explicitly shown, and its action is View index record rather than View snapshot. Google/Bing/DuckDuckGo links are grouped inside the existing advanced-options disclosure; the selected design is otherwise preserved.
